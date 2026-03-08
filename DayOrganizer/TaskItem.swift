@@ -2,17 +2,18 @@ import Foundation
 import SwiftData
 
 @Model
-class TaskItem {
+class TaskItem: Identifiable {
     var title: String
-    var timestamp: Date
+    var subtext: String
+    var estimatedMinutes: Int
+    var repeatDays: [Bool]
     var isCompleted: Bool = false
-    
-    var latitude: Double?
-    var longitude: Double?
-    var locationName: String?
+    var createdAt: Date = Date()
 
-    init(title: String, timestamp: Date) {
+    init(title: String = "", subtext: String = "", estimatedMinutes: Int = 30, repeatDays: [Bool] = Array(repeating: false, count: 7)) {
         self.title = title
-        self.timestamp = timestamp
+        self.subtext = subtext
+        self.estimatedMinutes = estimatedMinutes
+        self.repeatDays = repeatDays
     }
 }
