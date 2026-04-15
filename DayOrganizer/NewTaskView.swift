@@ -33,7 +33,6 @@ struct NewTaskView: View {
                     HStack {
 
                         TextField("30", text: $timeInput)
-                            .keyboardType(.numberPad)
                             .frame(width: 60)
                             .textFieldStyle(.roundedBorder)
 

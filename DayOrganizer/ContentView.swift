@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum AppPage {
+enum AppPage { // TODO: add new cases when implementing new pages
     case todo
     case calendar
 }
@@ -21,7 +21,7 @@ struct ContentView: View {
 
                     .toolbar {
 
-                        ToolbarItem(placement: .topBarLeading) {
+                        ToolbarItem(placement: .navigation) {
                             Button {
                                 withAnimation {
                                     showMenu.toggle()
@@ -45,15 +45,13 @@ struct ContentView: View {
     @ViewBuilder
     var contentView: some View {
 
-        switch currentPage {
+        switch currentPage { // TODO: add new cases when implementing new pages
 
         case .todo:
             TODOView()
 
         case .calendar:
-            Text("Calendar Coming Soon")
-                .font(.title)
-
+            CalendarView()
         }
 
     }

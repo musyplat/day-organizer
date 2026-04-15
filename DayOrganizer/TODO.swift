@@ -44,7 +44,7 @@ struct TODOView: View {
         }
         .toolbar {
 
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingNewTaskSheet = true
                 } label: {
@@ -117,7 +117,8 @@ struct TODOView: View {
     private func deleteTasks(offsets: IndexSet) {
 
         for index in offsets {
-            modelContext.delete(tasks[index])
+            let task = tasks[index]
+            TaskEngine.markTaskCompleted(task)
         }
 
     }
@@ -127,7 +128,7 @@ struct TODOView: View {
         completingTasks.insert(task.id)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            modelContext.delete(task)
+            TaskEngine.markTaskCompleted(task)
             completingTasks.remove(task.id)
         }
 
