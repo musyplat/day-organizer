@@ -10,7 +10,6 @@ struct TODOView: View {
 
     @State private var showingNewTaskSheet = false
     @State private var editingTask: TaskItem?
-
     @State private var completingTasks: Set<TaskItem.ID> = []
 
     var body: some View {
@@ -20,22 +19,18 @@ struct TODOView: View {
             if tasks.isEmpty {
 
                 Spacer()
-
                 Text("No tasks to complete!")
                     .font(.title3)
                     .foregroundColor(.secondary)
-
                 Spacer()
 
             } else {
 
                 List {
-
                     ForEach(tasks) { task in
                         taskRow(task)
                     }
                     .onDelete(perform: deleteTasks)
-
                 }
                 .animation(.easeInOut, value: tasks)
 
@@ -43,7 +38,6 @@ struct TODOView: View {
 
         }
         .toolbar {
-
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingNewTaskSheet = true
@@ -51,13 +45,10 @@ struct TODOView: View {
                     Image(systemName: "plus")
                 }
             }
-
         }
-
         .sheet(isPresented: $showingNewTaskSheet) {
             NewTaskView()
         }
-
         .sheet(item: $editingTask) { task in
             NewTaskView(task: task)
         }
@@ -73,65 +64,46 @@ struct TODOView: View {
             Button {
                 completeTask(task)
             } label: {
-
                 Image(systemName: isCompleting ? "checkmark.circle.fill" : "circle")
                     .font(.title2)
                     .scaleEffect(isCompleting ? 1.25 : 1)
                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: isCompleting)
                     .padding(6)
-
             }
             .buttonStyle(.plain)
 
             VStack(alignment: .leading) {
-
                 Text(task.title)
                     .font(.headline)
-
                 if !task.subtext.isEmpty {
-
                     Text(task.subtext)
                         .font(.subheadline)
                         .foregroundColor(.secondary)
-
                 }
-
             }
 
             Spacer()
 
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            editingTask = task
-        }
-
+        .onTapGesture { editingTask = task }
         .opacity(isCompleting ? 0 : 1)
-
         .scaleEffect(isCompleting ? 0.9 : 1)
-
         .animation(.easeOut(duration: 0.35), value: isCompleting)
 
     }
 
     private func deleteTasks(offsets: IndexSet) {
-
         for index in offsets {
-            let task = tasks[index]
-            TaskEngine.markTaskCompleted(task)
+            modelContext.delete(tasks[index])
         }
-
     }
 
     private func completeTask(_ task: TaskItem) {
-
         completingTasks.insert(task.id)
-
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            TaskEngine.markTaskCompleted(task)
+            TaskEngine.markCompleted(task)
             completingTasks.remove(task.id)
         }
-
     }
-
 }

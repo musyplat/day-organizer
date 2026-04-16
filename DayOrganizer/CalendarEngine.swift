@@ -1,52 +1,57 @@
 import Foundation
+import CoreGraphics
 
 struct CalendarEngine {
 
-    static let minuteHeight: Double = 1.2
-    static let dayMinutes = 24 * 60
+    // MARK: - Layout
 
-    // MARK: Snap Time
+    /// Points per minute in the scroll content
+    static let minuteHeight: Double = 1.5
 
-    static func snapToQuarterHour(_ date: Date) -> Date {
+    /// Width of the left gutter that holds hour labels
+    static let gutterWidth: Double = 58
 
-        let calendar = Calendar.current
-        let minute = calendar.component(.minute, from: date)
+    /// Total height of the full-day content (midnight-to-midnight)
+    static var totalHeight: Double { Double(24 * 60) * minuteHeight }
 
-        let snapped = Int(round(Double(minute) / 15.0) * 15)
+    // MARK: - Coordinate Conversion
 
-        return calendar.date(
-            bySettingHour: calendar.component(.hour, from: date),
-            minute: snapped,
-            second: 0,
-            of: date
-        ) ?? date
+    /// Y offset in the scroll content for a given minute from midnight
+    static func yOffset(for minute: Int) -> Double {
+        Double(clamped(minute)) * minuteHeight
     }
 
-    // MARK: Convert Time → Y position
-
-    static func yPosition(for date: Date) -> Double {
-
-        let calendar = Calendar.current
-
-        let hour = calendar.component(.hour, from: date)
-        let minute = calendar.component(.minute, from: date)
-
-        let totalMinutes = (hour * 60) + minute
-
-        return Double(totalMinutes) * minuteHeight
+    /// Nearest minute from midnight for a Y offset in the scroll content
+    static func minute(for yOffset: Double) -> Int {
+        clamped(Int(yOffset / minuteHeight))
     }
 
-    // MARK: Convert Y → Time
-
-    static func timeFromYOffset(_ y: Double, baseDate: Date) -> Date {
-
-        let minutes = Int(y / minuteHeight)
-
-        return Calendar.current.date(
-            byAdding: .minute,
-            value: minutes,
-            to: Calendar.current.startOfDay(for: baseDate)
-        )!
+    /// Snaps a minute value to the nearest `interval` (default 5 min)
+    static func snap(_ minute: Int, to interval: Int = 5) -> Int {
+        let rounded = Int(round(Double(minute) / Double(interval))) * interval
+        return clamped(rounded)
     }
 
+    // MARK: - Labels
+
+    static func hourLabel(_ hour: Int) -> String {
+        let h = hour % 12 == 0 ? 12 : hour % 12
+        return "\(h) \(hour < 12 ? "AM" : "PM")"
+    }
+
+    /// Short time string for a minute-from-midnight value, e.g. "9:30 AM"
+    static func timeLabel(for minute: Int) -> String {
+        let h = minute / 60
+        let m = minute % 60
+        let displayHour = h % 12 == 0 ? 12 : h % 12
+        let suffix = h < 12 ? "AM" : "PM"
+        if m == 0 { return "\(displayHour) \(suffix)" }
+        return "\(displayHour):\(String(format: "%02d", m)) \(suffix)"
+    }
+
+    // MARK: - Private
+
+    private static func clamped(_ minute: Int) -> Int {
+        min(max(minute, 0), 24 * 60 - 1)
+    }
 }

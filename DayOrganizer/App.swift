@@ -7,6 +7,6 @@ struct ProductivityApp: App {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(for: [TaskItem.self, ScheduledTask.self])
+        .modelContainer(for: [TaskItem.self, ScheduledBlock.self])
     }
 }
