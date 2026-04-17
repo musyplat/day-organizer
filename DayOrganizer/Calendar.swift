@@ -1,15 +1,12 @@
 import SwiftUI
 import SwiftData
 
-// MARK: - Preference Key
-// Tracks the ZStack scroll-content origin in the named "canvas" coordinate space.
-// Because it uses .background(GeometryReader), it always reports the correct value
-// as the ScrollView scrolls.
-private struct TimelineOriginKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
+// Carries task + optional block context into the info sheet.
+private struct InfoSheetItem: Identifiable {
+    let task: TaskItem
+    let block: ScheduledBlock?
+    // Use block ID when available so unscheduled vs scheduled entries are distinct.
+    var id: PersistentIdentifier { block?.persistentModelID ?? task.persistentModelID }
 }
 
 // MARK: - Calendar View
@@ -24,12 +21,24 @@ struct CalendarView: View {
     private let today = Calendar.current.startOfDay(for: Date())
 
     // MARK: Drag state
-    @State private var dragTask: TaskItem?          // task currently being dragged
+    @State private var dragTask: TaskItem?         // task dragged FROM the unassigned pool
+    @State private var dragBlock: ScheduledBlock?  // block being relocated FROM the timeline
     @State private var dragLocation: CGPoint = .zero // in "canvas" coordinate space
     @State private var isDragActive = false
+    // Set as soon as the long-press threshold is met, before any finger movement.
+    // Drives the "lifted" visual on a block so the user knows relocation is ready.
+    @State private var preparingBlockID: PersistentIdentifier?
 
-    // Updated via TimelineOriginKey as the timeline ScrollView scrolls
+    // ZStack's top in canvas space — kept live by .onGeometryChange so programmatic
+    // scrolls (e.g. the on-appear scroll to the current hour) are reflected.
     @State private var timelineOriginY: CGFloat = 0
+    // Bottom edge of the timeline viewport in canvas space.
+    // ghostMinute returns nil when the finger is below this boundary so that
+    // dropping onto the pool area cancels the placement.
+    @State private var timelineSectionBottomY: CGFloat = 0
+
+    // MARK: Info sheet
+    @State private var infoSheetItem: InfoSheetItem?
 
     // MARK: Derived data
 
@@ -42,10 +51,15 @@ struct CalendarView: View {
         TaskEngine.availableTasks(from: tasks, blocks: allBlocks, date: Date())
     }
 
-    /// Snapped minute-from-midnight where the ghost block should appear.
-    /// Returns nil when the drag is outside the timeline's time range.
+    /// Snapped minute-from-midnight for the ghost block preview.
+    /// Returns nil when not dragging, when the finger is over the pool area,
+    /// or when the computed y falls outside the 24-hour content range.
     private var ghostMinute: Int? {
         guard isDragActive else { return nil }
+        // Require layout to have fired before accepting drops.
+        guard timelineSectionBottomY > 0 else { return nil }
+        // Finger must be inside the timeline viewport — not over the pool below.
+        guard dragLocation.y < timelineSectionBottomY else { return nil }
         let rawY = dragLocation.y - timelineOriginY
         guard rawY >= 0, rawY <= CalendarEngine.totalHeight else { return nil }
         return CalendarEngine.snap(CalendarEngine.minute(for: rawY))
@@ -60,6 +74,13 @@ struct CalendarView: View {
                 // ── Top 55 %: scrollable timeline
                 timelineSection
                     .frame(height: geo.size.height * 0.55)
+                    // Track the timeline section's bottom edge in canvas space so
+                    // we can distinguish a drop on the timeline vs. a drop on the pool.
+                    .onGeometryChange(for: CGFloat.self, of: { proxy in
+                        proxy.frame(in: .named("canvas")).maxY
+                    }) { newValue in
+                        timelineSectionBottomY = newValue
+                    }
 
                 Divider()
 
@@ -86,9 +107,13 @@ struct CalendarView: View {
             }
             // Floating pill that follows the finger during drag
             .overlay(alignment: .topLeading) {
-                if let task = dragTask {
-                    floatingPill(task: task)
+                if isDragActive {
+                    let title = dragBlock?.task.title ?? dragTask?.title ?? ""
+                    floatingPill(title: title)
                 }
+            }
+            .sheet(item: $infoSheetItem) { item in
+                TaskInfoSheet(task: item.task, block: item.block)
             }
         }
         .coordinateSpace(name: "canvas")
@@ -108,23 +133,22 @@ struct CalendarView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: CalendarEngine.totalHeight)
-                // This background GeometryReader is the correct way to track a scrolling
-                // view's position. It always reports the ZStack's actual minY in canvas space.
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(
-                            key: TimelineOriginKey.self,
-                            value: geo.frame(in: .named("canvas")).minY
-                        )
-                    }
-                )
+                // .onGeometryChange fires during animated scrolls (including
+                // proxy.scrollTo) so timelineOriginY stays accurate throughout.
+                .onGeometryChange(for: CGFloat.self, of: { proxy in
+                    proxy.frame(in: .named("canvas")).minY
+                }) { newValue in
+                    timelineOriginY = newValue
+                }
 
             }
-            .onPreferenceChange(TimelineOriginKey.self) { value in
-                timelineOriginY = value
-            }
+            // Lock scrolling once the long-press has fired (preparingBlockID is set)
+            // or an active drag is in progress. This prevents the ScrollView from
+            // fighting the relocation drag after the gesture threshold is met.
+            // While neither state is active the ScrollView scrolls freely, even
+            // when the touch starts on top of a scheduled block.
+            .scrollDisabled(preparingBlockID != nil || isDragActive)
             .onAppear {
-                // Slight delay so the ScrollView has finished layout before we scroll
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     let hour = Calendar.current.component(.hour, from: Date())
                     if hour >= 23 {
@@ -142,7 +166,7 @@ struct CalendarView: View {
     private var hourGridLayer: some View {
         VStack(spacing: 0) {
             ForEach(0..<24, id: \.self) { hour in
-                HStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
                     Text(CalendarEngine.hourLabel(hour))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -152,6 +176,7 @@ struct CalendarView: View {
                         .fill(Color.secondary.opacity(0.18))
                         .frame(height: 1)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .frame(height: CalendarEngine.minuteHeight * 60)
                 .id("hour-\(hour)")
             }
@@ -167,8 +192,10 @@ struct CalendarView: View {
     }
 
     private func blockView(_ block: ScheduledBlock) -> some View {
-        let y      = CalendarEngine.yOffset(for: block.startMinute)
-        let height = max(CalendarEngine.minuteHeight * Double(block.durationMinutes), 24)
+        let y            = CalendarEngine.yOffset(for: block.startMinute)
+        let height       = max(CalendarEngine.minuteHeight * Double(block.durationMinutes), 24)
+        let isPreparing  = preparingBlockID == block.persistentModelID
+        let isBeingMoved = dragBlock?.persistentModelID == block.persistentModelID
 
         return RoundedRectangle(cornerRadius: 7)
             .fill(block.isCompleted ? Color.gray.opacity(0.45) : Color.blue.opacity(0.78))
@@ -189,8 +216,29 @@ struct CalendarView: View {
             }
             .padding(.leading, CalendarEngine.gutterWidth + 4)
             .padding(.trailing, 8)
+            // "Preparing" = long-press met but no movement yet → lift effect.
+            // "Being moved" = finger is dragging → dim so the ghost is the focus.
+            .scaleEffect(isPreparing ? 1.04 : 1.0)
+            .opacity(isBeingMoved ? 0.3 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: isPreparing)
+            .animation(.easeOut(duration: 0.15), value: isBeingMoved)
             .offset(y: y)
-            .allowsHitTesting(false) // don't block gestures on the ZStack
+            // Haptic fires exactly when the long-press threshold is met.
+            .sensoryFeedback(.impact(weight: .medium), trigger: isPreparing)
+            // Quick tap → info sheet; long hold + drag → relocate; quick drag → scroll.
+            // Both tap and long-press-drag are attached via .simultaneousGesture so the
+            // ScrollView's pan recognizer can run alongside them. A fast finger swipe
+            // moves past the tap's slop and the long-press threshold before either
+            // child gesture commits, so the ScrollView wins and the timeline scrolls.
+            // Once the long press fires, .scrollDisabled locks the ScrollView so only
+            // the drag relocates the block.
+            .simultaneousGesture(
+                TapGesture()
+                    .onEnded {
+                        infoSheetItem = InfoSheetItem(task: block.task, block: block)
+                    }
+            )
+            .simultaneousGesture(makeBlockDragGesture(for: block))
     }
 
     // MARK: Current Time Line
@@ -209,7 +257,7 @@ struct CalendarView: View {
                 .fill(Color.red)
                 .frame(height: 1.5)
         }
-        .offset(y: y)
+        .offset(y: y - 4.5)
         .allowsHitTesting(false)
     }
 
@@ -217,14 +265,22 @@ struct CalendarView: View {
 
     @ViewBuilder
     private var ghostLayer: some View {
-        if let task = dragTask, let minute = ghostMinute {
-            ghostBlockView(task: task, minute: minute)
+        if let minute = ghostMinute {
+            if let task = dragTask {
+                ghostBlockView(title: task.title,
+                               durationMinutes: task.estimatedMinutes,
+                               minute: minute)
+            } else if let block = dragBlock {
+                ghostBlockView(title: block.task.title,
+                               durationMinutes: block.durationMinutes,
+                               minute: minute)
+            }
         }
     }
 
-    private func ghostBlockView(task: TaskItem, minute: Int) -> some View {
+    private func ghostBlockView(title: String, durationMinutes: Int, minute: Int) -> some View {
         let y      = CalendarEngine.yOffset(for: minute)
-        let height = max(CalendarEngine.minuteHeight * Double(task.estimatedMinutes), 24)
+        let height = max(CalendarEngine.minuteHeight * Double(durationMinutes), 24)
 
         return RoundedRectangle(cornerRadius: 7)
             .fill(Color.blue.opacity(0.18))
@@ -235,7 +291,7 @@ struct CalendarView: View {
             .frame(height: height)
             .overlay(alignment: .topLeading) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(task.title)
+                    Text(title)
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundStyle(.primary.opacity(0.85))
@@ -335,7 +391,16 @@ struct CalendarView: View {
         )
         .scaleEffect(isBeingDragged ? 0.95 : 1.0)
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isBeingDragged)
-        .gesture(makeDragGesture(for: task))
+        .contentShape(Rectangle())
+        // Quick tap → info sheet; long hold + drag → schedule onto timeline; quick
+        // swipe → lets the enclosing List/ScrollView scroll normally.
+        .simultaneousGesture(
+            TapGesture()
+                .onEnded {
+                    infoSheetItem = InfoSheetItem(task: task, block: nil)
+                }
+        )
+        .simultaneousGesture(makeDragGesture(for: task))
     }
 
     // MARK: Assigned Card
@@ -368,13 +433,17 @@ struct CalendarView: View {
             RoundedRectangle(cornerRadius: 9)
                 .fill(Color.blue.opacity(0.08))
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            infoSheetItem = InfoSheetItem(task: block.task, block: block)
+        }
     }
 
     // MARK: Floating Pill
 
-    private func floatingPill(task: TaskItem) -> some View {
+    private func floatingPill(title: String) -> some View {
         HStack(spacing: 6) {
-            Text(task.title)
+            Text(title)
                 .font(.subheadline)
                 .fontWeight(.medium)
             if let minute = ghostMinute {
@@ -391,8 +460,10 @@ struct CalendarView: View {
         .allowsHitTesting(false)
     }
 
-    // MARK: - Drag Gesture
+    // MARK: - Drag Gestures
 
+    /// Pool-card drag. Dropping in the pool is a no-op (ghostMinute is nil
+    /// when the finger is below the timeline viewport boundary).
     private func makeDragGesture(for task: TaskItem) -> some Gesture {
         LongPressGesture(minimumDuration: 0.25)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("canvas")))
@@ -408,14 +479,59 @@ struct CalendarView: View {
             }
             .onEnded { _ in
                 defer {
-                    dragTask    = nil
+                    dragTask     = nil
                     isDragActive = false
                 }
                 guard isDragActive,
                       dragTask?.persistentModelID == task.persistentModelID,
-                      let minute = ghostMinute
+                      let minute = ghostMinute  // nil when dropped in pool → no block created
                 else { return }
                 createBlock(task: task, startMinute: minute)
+            }
+    }
+
+    /// Timeline-block drag. Dropping back onto the timeline moves the block;
+    /// dropping into the pool unschedules it (deletes the block so the task
+    /// reappears in the unassigned pool).
+    private func makeBlockDragGesture(for block: ScheduledBlock) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.25)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("canvas")))
+            .onChanged { value in
+                switch value {
+                case .second(true, nil):
+                    // Long-press threshold met; finger hasn't moved yet.
+                    // Set preparingBlockID so the block shows the "lifted" look
+                    // immediately — before any dragging occurs.
+                    if preparingBlockID == nil {
+                        preparingBlockID = block.persistentModelID
+                    }
+                case .second(true, let drag?):
+                    // Finger started moving — transition to active drag.
+                    preparingBlockID = nil
+                    if dragBlock == nil { dragBlock = block }
+                    isDragActive = true
+                    dragLocation = drag.location
+                default:
+                    break
+                }
+            }
+            .onEnded { _ in
+                defer {
+                    preparingBlockID = nil
+                    dragBlock        = nil
+                    isDragActive     = false
+                }
+                guard isDragActive,
+                      dragBlock?.persistentModelID == block.persistentModelID
+                else { return }
+
+                if let minute = ghostMinute {
+                    // Finger released on the timeline → relocate.
+                    block.startMinute = minute
+                } else {
+                    // Finger released on the pool → unschedule.
+                    modelContext.delete(block)
+                }
             }
     }
 
@@ -432,5 +548,112 @@ struct CalendarView: View {
         } else {
             modelContext.delete(task)
         }
+    }
+}
+
+// MARK: - Task Info Sheet
+
+private struct TaskInfoSheet: View {
+
+    @Environment(\.dismiss) private var dismiss
+    let task: TaskItem
+    let block: ScheduledBlock?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+
+                // ── Editable task details
+                Section("Task Info") {
+
+                    // Title
+                    TextField("Title", text: Binding(
+                        get: { task.title },
+                        set: { task.title = $0 }
+                    ))
+
+                    // Notes / subtext
+                    TextField("Notes", text: Binding(
+                        get: { task.subtext },
+                        set: { task.subtext = $0 }
+                    ), axis: .vertical)
+                    .lineLimit(1...4)
+
+                    // Duration — 5-minute steps, 5 min → 8 hr
+                    Stepper(
+                        value: Binding(
+                            get: { task.estimatedMinutes },
+                            set: { task.estimatedMinutes = $0 }
+                        ),
+                        in: 5...480, step: 5
+                    ) {
+                        HStack {
+                            Text("Duration")
+                            Spacer()
+                            Text(durationText)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    // Scheduled time — only when a block exists
+                    if let block {
+                        DatePicker(
+                            "Scheduled at",
+                            selection: Binding(
+                                get: {
+                                    let midnight = Calendar.current.startOfDay(for: Date())
+                                    return Calendar.current.date(
+                                        byAdding: .minute, value: block.startMinute, to: midnight
+                                    ) ?? Date()
+                                },
+                                set: { newDate in
+                                    let midnight = Calendar.current.startOfDay(for: Date())
+                                    let comps = Calendar.current.dateComponents(
+                                        [.hour, .minute], from: midnight, to: newDate
+                                    )
+                                    block.startMinute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+                                }
+                            ),
+                            displayedComponents: .hourAndMinute
+                        )
+                    }
+                }
+
+                // ── Calendar actions (placeholder — wired up in a future update)
+                Section {
+                    actionRow(label: "Push to Current Time", icon: "arrow.down.to.line.compact")
+                    actionRow(label: "Move Up",              icon: "arrow.up")
+                    actionRow(label: "Move Down",            icon: "arrow.down")
+                    actionRow(label: "Split Task",           icon: "scissors")
+                } header: {
+                    Text("Actions")
+                } footer: {
+                    Text("Calendar management features are coming soon.")
+                }
+
+            }
+            .navigationTitle(task.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private func actionRow(label: String, icon: String) -> some View {
+        Button(action: {}) {
+            Label(label, systemImage: icon)
+        }
+    }
+
+    private var durationText: String {
+        let mins = task.estimatedMinutes
+        guard mins >= 60 else { return "\(mins) min" }
+        let hours = mins / 60
+        let rem   = mins % 60
+        return rem == 0 ? "\(hours) hr" : "\(hours) hr \(rem) min"
     }
 }

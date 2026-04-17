@@ -17,7 +17,7 @@ struct ContentView: View {
             NavigationStack {
 
                 contentView
-                    .navigationTitle(currentPage == .todo ? "TODO" : "Calendar")
+                    .navigationTitle(currentPage == .todo ? "Task List" : "Calendar")
 
                     .toolbar {
 
@@ -67,7 +67,7 @@ struct ContentView: View {
                     showMenu = false
                 } label: {
 
-                    Label("TODO", systemImage: "checklist")
+                    Label("Task List", systemImage: "checklist")
                         .font(.title3)
                         .foregroundColor(currentPage == .todo ? .blue : .primary)
 
