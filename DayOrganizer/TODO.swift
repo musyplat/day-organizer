@@ -95,14 +95,24 @@ struct TODOView: View {
 
     private func deleteTasks(offsets: IndexSet) {
         for index in offsets {
-            modelContext.delete(tasks[index])
+            let task = tasks[index]
+            // Cancel pushes for every block that would be cascade-deleted.
+            NotificationManager.cancel(for: task.scheduledBlocks)
+            modelContext.delete(task)
         }
     }
 
+    // The Task List's complete button is "absolute": clicking it removes the
+    // task from the list entirely, regardless of whether it's repeating. The
+    // per-day "complete only for today" flow lives in the Calendar's modal.
     private func completeTask(_ task: TaskItem) {
         completingTasks.insert(task.id)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            TaskEngine.markCompleted(task)
+            // Cascade-delete will remove any ScheduledBlocks; cancel their
+            // pending notifications first so nothing fires for a task that
+            // no longer exists.
+            NotificationManager.cancel(for: task.scheduledBlocks)
+            modelContext.delete(task)
             completingTasks.remove(task.id)
         }
     }

@@ -42,9 +42,17 @@ struct CalendarView: View {
 
     // MARK: Derived data
 
+    // Blocks for today that should still be shown: same-day AND the underlying
+    // task hasn't been completed today. Completing a repeating task from the
+    // modal sets lastCompletedDate = today, which drops its block from this
+    // list (timeline + Assigned column) without deleting the block itself, so
+    // tomorrow's view is unaffected.
     private var todayBlocks: [ScheduledBlock] {
-        allBlocks.filter { Calendar.current.isDate($0.dayDate, inSameDayAs: today) }
-            .sorted { $0.startMinute < $1.startMinute }
+        allBlocks.filter {
+            Calendar.current.isDate($0.dayDate, inSameDayAs: today)
+            && !TaskEngine.wasCompleted($0.task, on: today)
+        }
+        .sorted { $0.startMinute < $1.startMinute }
     }
 
     private var availableTasks: [TaskItem] {
@@ -225,20 +233,25 @@ struct CalendarView: View {
             .offset(y: y)
             // Haptic fires exactly when the long-press threshold is met.
             .sensoryFeedback(.impact(weight: .medium), trigger: isPreparing)
-            // Quick tap → info sheet; long hold + drag → relocate; quick drag → scroll.
-            // Both tap and long-press-drag are attached via .simultaneousGesture so the
-            // ScrollView's pan recognizer can run alongside them. A fast finger swipe
-            // moves past the tap's slop and the long-press threshold before either
-            // child gesture commits, so the ScrollView wins and the timeline scrolls.
-            // Once the long press fires, .scrollDisabled locks the ScrollView so only
-            // the drag relocates the block.
-            .simultaneousGesture(
-                TapGesture()
-                    .onEnded {
-                        infoSheetItem = InfoSheetItem(task: block.task, block: block)
-                    }
-            )
-            .simultaneousGesture(makeBlockDragGesture(for: block))
+            // Gesture arbitration story:
+            //   • Quick tap (down + up within TapGesture slop)  → info sheet.
+            //   • Quick swipe (finger moves past LongPress slop before 0.25 s)
+            //     → LongPress fails → sequenced gesture fails → ScrollView's
+            //     pan takes the touch and scrolls the timeline.
+            //   • Hold 0.25 s stationary → LongPress fires, preparingBlockID is
+            //     set (haptic + lift), .scrollDisabled below freezes the
+            //     ScrollView, and the inner DragGesture tracks the finger for
+            //     relocation.
+            //
+            // Plain `.gesture` (not `.simultaneousGesture`) is essential here:
+            // with simultaneous the ScrollView's pan competes with the latent
+            // LongPress during its 0.25 s window and stalls. With `.gesture`,
+            // the LongPress stays dormant and lets the ScrollView pan freely
+            // until (or unless) the long-press threshold is met.
+            .onTapGesture {
+                infoSheetItem = InfoSheetItem(task: block.task, block: block)
+            }
+            .gesture(makeBlockDragGesture(for: block))
     }
 
     // MARK: Current Time Line
@@ -392,15 +405,13 @@ struct CalendarView: View {
         .scaleEffect(isBeingDragged ? 0.95 : 1.0)
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isBeingDragged)
         .contentShape(Rectangle())
-        // Quick tap → info sheet; long hold + drag → schedule onto timeline; quick
-        // swipe → lets the enclosing List/ScrollView scroll normally.
-        .simultaneousGesture(
-            TapGesture()
-                .onEnded {
-                    infoSheetItem = InfoSheetItem(task: task, block: nil)
-                }
-        )
-        .simultaneousGesture(makeDragGesture(for: task))
+        // Same arbitration pattern as blockView — see comment there. Plain
+        // `.gesture` lets the enclosing pool ScrollView pan freely on a quick
+        // swipe; a sustained hold commits to the sequenced drag.
+        .onTapGesture {
+            infoSheetItem = InfoSheetItem(task: task, block: nil)
+        }
+        .gesture(makeDragGesture(for: task))
     }
 
     // MARK: Assigned Card
@@ -419,6 +430,7 @@ struct CalendarView: View {
             Spacer()
 
             Button {
+                NotificationManager.cancel(for: block)
                 modelContext.delete(block)
             } label: {
                 Image(systemName: "xmark.circle")
@@ -526,10 +538,13 @@ struct CalendarView: View {
                 else { return }
 
                 if let minute = ghostMinute {
-                    // Finger released on the timeline → relocate.
+                    // Finger released on the timeline → relocate + reschedule
+                    // the notification (schedule() is replace-or-remove).
                     block.startMinute = minute
+                    NotificationManager.schedule(for: block)
                 } else {
                     // Finger released on the pool → unschedule.
+                    NotificationManager.cancel(for: block)
                     modelContext.delete(block)
                 }
             }
@@ -540,12 +555,20 @@ struct CalendarView: View {
     private func createBlock(task: TaskItem, startMinute: Int) {
         let block = ScheduledBlock(task: task, dayDate: today, startMinute: startMinute)
         modelContext.insert(block)
+        NotificationManager.schedule(for: block)
     }
 
     private func completeTask(_ task: TaskItem) {
         if task.isRepeating {
             TaskEngine.markCompleted(task)
+            // Only today's blocks are hidden from view — cancel their pushes.
+            let todays = task.scheduledBlocks.filter {
+                Calendar.current.isDate($0.dayDate, inSameDayAs: today)
+            }
+            NotificationManager.cancel(for: todays)
         } else {
+            // Cascade-delete will remove the blocks; cancel their pushes first.
+            NotificationManager.cancel(for: task.scheduledBlocks)
             modelContext.delete(task)
         }
     }
@@ -556,6 +579,7 @@ struct CalendarView: View {
 private struct TaskInfoSheet: View {
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     let task: TaskItem
     let block: ScheduledBlock?
 
@@ -612,11 +636,44 @@ private struct TaskInfoSheet: View {
                                         [.hour, .minute], from: midnight, to: newDate
                                     )
                                     block.startMinute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+                                    NotificationManager.schedule(for: block)
                                 }
                             ),
                             displayedComponents: .hourAndMinute
                         )
                     }
+                }
+
+                // ── Per-day completion
+                // Repeating task → record today's completion (task stays in
+                // the Task List, disappears from today's pool + timeline).
+                // Non-repeating task → remove it from the Task List entirely
+                // (cascade-deletes any ScheduledBlock via the model relationship).
+                Section {
+                    Button(role: task.isRepeating ? nil : .destructive) {
+                        if task.isRepeating {
+                            TaskEngine.markCompleted(task)
+                            // Suppress any pending pushes for today only.
+                            let today = Calendar.current.startOfDay(for: Date())
+                            let todays = task.scheduledBlocks.filter {
+                                Calendar.current.isDate($0.dayDate, inSameDayAs: today)
+                            }
+                            NotificationManager.cancel(for: todays)
+                        } else {
+                            NotificationManager.cancel(for: task.scheduledBlocks)
+                            modelContext.delete(task)
+                        }
+                        dismiss()
+                    } label: {
+                        Label(
+                            task.isRepeating ? "Complete for Today" : "Complete Task",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                    }
+                } footer: {
+                    Text(task.isRepeating
+                         ? "Marks this task done for today. It will return on its next scheduled day."
+                         : "Removes this task from the Task List.")
                 }
 
                 // ── Calendar actions (placeholder — wired up in a future update)
