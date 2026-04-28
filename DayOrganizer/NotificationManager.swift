@@ -21,9 +21,14 @@ private final class NotificationDelegate: NSObject, UNUserNotificationCenterDele
 /// Thin wrapper around `UNUserNotificationCenter` for scheduling reminders
 /// when a `ScheduledBlock` starts.
 ///
-/// Each block gets one local notification, keyed by the block's
-/// `notificationID` (a UUID we own — see ScheduledBlock for why we don't use
-/// `persistentModelID`).
+/// Each block can produce up to two local notifications:
+///   • a *buffer* heads-up at `start − bufferMinutes` (only if the task has
+///     a non-zero buffer), and
+///   • a *start* reminder at the actual start time.
+///
+/// Both are keyed by the block's `notificationID` (a UUID we own — see
+/// ScheduledBlock for why we don't use `persistentModelID`) plus a stable
+/// suffix, so each can be canceled or replaced independently.
 enum NotificationManager {
 
     // MARK: - Authorization
@@ -42,70 +47,130 @@ enum NotificationManager {
 
     // MARK: - Schedule / Cancel
 
-    /// Schedule (or replace) a notification that fires when `block.startTime`
-    /// matches the wall clock. If the start time has already passed, nothing
-    /// is scheduled — we still clear any pending request with this id so stale
-    /// entries don't linger.
+    /// Schedule (or replace) the buffer + start notifications for this block.
+    /// Always clears any pending requests for both ids first so a relocate or
+    /// buffer-time edit can't leave a stale push behind. If a fire date has
+    /// already passed (buffer time before "now", or start time before "now"),
+    /// the corresponding push is silently skipped — this is normal for blocks
+    /// scheduled close to the current minute.
     static func schedule(for block: ScheduledBlock) {
-        let id = identifier(for: block)
         let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: [id])
+        let ids = allIdentifiers(for: block)
+        center.removePendingNotificationRequests(withIdentifiers: ids)
 
-        let fireDate = block.startTime
-        guard fireDate > Date() else { return }
+        let now = Date()
 
-        let content = UNMutableNotificationContent()
-        content.title = block.task.title
+        // ── Start reminder
+        if block.startTime > now {
+            let request = makeStartRequest(for: block)
+            center.add(request) { error in
+                if let error {
+                    print("[NotificationManager] schedule (start) failed for \(request.identifier): \(error)")
+                }
+            }
+        }
 
-        // Body: "<start time> — <subtext>" when subtext exists, else just the
-        // time. Keeping the time here means the push reads the same whether
-        // it's delivered on-schedule or a minute late.
-        let timeLabel = CalendarEngine.timeLabel(for: block.startMinute)
-        let subtext = block.task.subtext.trimmingCharacters(in: .whitespacesAndNewlines)
-        content.body = subtext.isEmpty ? timeLabel : "\(timeLabel) — \(subtext)"
-        content.sound = .default
-
-        let comps = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute],
-            from: fireDate
-        )
-        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
-
-        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
-        center.add(request) { error in
-            if let error {
-                // Surfacing this — silent .add() failures previously made
-                // "sometimes notifications don't get sent" hard to diagnose.
-                print("[NotificationManager] schedule failed for \(id): \(error)")
+        // ── Buffer heads-up
+        let buffer = block.task.bufferMinutes
+        if buffer > 0 {
+            let bufferDate = block.startTime.addingTimeInterval(-Double(buffer) * 60)
+            if bufferDate > now {
+                let request = makeBufferRequest(for: block, bufferMinutes: buffer, fireDate: bufferDate)
+                center.add(request) { error in
+                    if let error {
+                        print("[NotificationManager] schedule (buffer) failed for \(request.identifier): \(error)")
+                    }
+                }
             }
         }
     }
 
-    /// Remove any pending notification for this block. Safe to call even if
-    /// nothing was scheduled.
+    /// Remove any pending notifications (both buffer + start) for this block.
+    /// Safe to call even if nothing was scheduled.
     static func cancel(for block: ScheduledBlock) {
         UNUserNotificationCenter.current()
-            .removePendingNotificationRequests(withIdentifiers: [identifier(for: block)])
+            .removePendingNotificationRequests(withIdentifiers: allIdentifiers(for: block))
     }
 
     /// Cancel several at once (e.g. before cascade-deleting a task).
     static func cancel<S: Sequence>(for blocks: S) where S.Element == ScheduledBlock {
-        let ids = blocks.map(identifier(for:))
+        let ids = blocks.flatMap(allIdentifiers(for:))
         guard !ids.isEmpty else { return }
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: ids)
     }
 
-    // MARK: - Identifier
+    // MARK: - Request Builders
 
-    /// Returns the block's stable notification id, lazy-assigning a UUID if
-    /// the block predates the `notificationID` field (legacy rows from before
-    /// this column was added migrate in as nil).
-    private static func identifier(for block: ScheduledBlock) -> String {
+    private static func makeStartRequest(for block: ScheduledBlock) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        content.title = block.task.title
+
+        let timeLabel = CalendarEngine.timeLabel(for: block.startMinute)
+        let subtext = block.task.subtext.trimmingCharacters(in: .whitespacesAndNewlines)
+        content.body = subtext.isEmpty ? timeLabel : "\(timeLabel) — \(subtext)"
+        content.sound = .default
+
+        let trigger = makeCalendarTrigger(for: block.startTime)
+        return UNNotificationRequest(
+            identifier: startIdentifier(for: block),
+            content: content,
+            trigger: trigger
+        )
+    }
+
+    private static func makeBufferRequest(
+        for block: ScheduledBlock,
+        bufferMinutes: Int,
+        fireDate: Date
+    ) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        // Title makes it clear this is a heads-up, not the task itself starting.
+        content.title = "Heads up: \(block.task.title)"
+
+        let timeLabel = CalendarEngine.timeLabel(for: block.startMinute)
+        content.body = "Starts in \(bufferMinutes) min — \(timeLabel)"
+        content.sound = .default
+
+        let trigger = makeCalendarTrigger(for: fireDate)
+        return UNNotificationRequest(
+            identifier: bufferIdentifier(for: block),
+            content: content,
+            trigger: trigger
+        )
+    }
+
+    private static func makeCalendarTrigger(for fireDate: Date) -> UNCalendarNotificationTrigger {
+        let comps = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: fireDate
+        )
+        return UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+    }
+
+    // MARK: - Identifiers
+
+    /// Returns both ids for a block so cancel/replace operations cover the
+    /// pair atomically.
+    private static func allIdentifiers(for block: ScheduledBlock) -> [String] {
+        [startIdentifier(for: block), bufferIdentifier(for: block)]
+    }
+
+    private static func startIdentifier(for block: ScheduledBlock) -> String {
+        "block-\(stableID(for: block))-start"
+    }
+
+    private static func bufferIdentifier(for block: ScheduledBlock) -> String {
+        "block-\(stableID(for: block))-buffer"
+    }
+
+    /// Lazy-assigns a UUID for blocks that predate the `notificationID`
+    /// field so identifiers stay stable across launches.
+    private static func stableID(for block: ScheduledBlock) -> String {
         if block.notificationID == nil {
             block.notificationID = UUID()
         }
         // Force-unwrap is safe: just assigned above if it was nil.
-        return "block-\(block.notificationID!.uuidString)"
+        return block.notificationID!.uuidString
     }
 }

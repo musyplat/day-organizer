@@ -12,6 +12,7 @@ struct NewTaskView: View {
     @State private var subtext = ""
     @State private var timeInput = "30"
     @State private var timeUnit = "Mins"
+    @State private var bufferMinutes = 0
     @State private var days = Array(repeating: false, count: 7)
 
     let dayLabels = ["S", "M", "T", "W", "T", "F", "S"]
@@ -43,6 +44,18 @@ struct NewTaskView: View {
                         }
                         .pickerStyle(.segmented)
 
+                    }
+
+                    // Optional pre-task buffer. 0 = none (this is what most
+                    // tasks will have), bumping it adds a heads-up notification
+                    // before the task and a gray runway above the calendar block.
+                    Stepper(value: $bufferMinutes, in: 0...60, step: 5) {
+                        HStack {
+                            Text("Buffer")
+                            Spacer()
+                            Text(bufferMinutes == 0 ? "None" : "\(bufferMinutes) min")
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                 }
@@ -114,6 +127,7 @@ struct NewTaskView: View {
         title = task.title
         subtext = task.subtext
         days = task.repeatDays
+        bufferMinutes = task.bufferMinutes
 
         if task.estimatedMinutes >= 60 && task.estimatedMinutes % 60 == 0 {
             timeInput = "\(task.estimatedMinutes / 60)"
@@ -135,7 +149,16 @@ struct NewTaskView: View {
             task.title = title
             task.subtext = subtext
             task.estimatedMinutes = totalMinutes
+            task.bufferMinutes = bufferMinutes
             task.repeatDays = days
+
+            // If this task already has scheduled blocks, their pre-existing
+            // notifications were tied to the previous buffer/title. Reschedule
+            // each so buffer pushes match the new value (and any title edits
+            // propagate through too).
+            for block in task.scheduledBlocks {
+                NotificationManager.schedule(for: block)
+            }
 
         } else {
 
@@ -143,6 +166,7 @@ struct NewTaskView: View {
                 title: title,
                 subtext: subtext,
                 estimatedMinutes: totalMinutes,
+                bufferMinutes: bufferMinutes,
                 repeatDays: days
             )
 

@@ -158,6 +158,9 @@ struct CalendarView: View {
 
                 ZStack(alignment: .topLeading) {
                     hourGridLayer
+                    bufferLayer            // sits behind blocks so a back-to-back
+                                           // schedule (buffer of B overlapping
+                                           // tail of A) hides the buffer, not A.
                     scheduledBlocksLayer
                     currentTimeLayer
                     ghostLayer
@@ -210,6 +213,49 @@ struct CalendarView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .frame(height: CalendarEngine.minuteHeight * 60)
                 .id("hour-\(hour)")
+            }
+        }
+    }
+
+    // MARK: Buffer Runways
+
+    /// Gray rectangles above each block representing the task's pre-buffer.
+    /// Drawn as its own layer so blockView stays focused on the task itself
+    /// and the Z-order keeps blocks visually dominant when buffers overlap.
+    private var bufferLayer: some View {
+        ForEach(todayBlocks) { block in
+            bufferView(block)
+        }
+    }
+
+    @ViewBuilder
+    private func bufferView(_ block: ScheduledBlock) -> some View {
+        let buffer = block.task.bufferMinutes
+        if buffer > 0 {
+            // Clamp to 0 so a buffer that would extend before midnight just
+            // truncates at the top of the canvas instead of rendering off-screen.
+            let visualStart  = max(0, block.startMinute - buffer)
+            let visualHeight = block.startMinute - visualStart
+            if visualHeight > 0 {
+                let y = CalendarEngine.yOffset(for: visualStart)
+                let h = Double(visualHeight) * CalendarEngine.minuteHeight
+                let isBeingMoved = dragBlock?.persistentModelID == block.persistentModelID
+
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 7, bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0, topTrailingRadius: 7,
+                    style: .continuous
+                )
+                .fill(Color.gray.opacity(0.35))
+                .frame(height: h)
+                .padding(.leading, CalendarEngine.gutterWidth + 4)
+                .padding(.trailing, 8)
+                // Match the block's "being dragged" dim so buffer + block
+                // fade together when the user is relocating.
+                .opacity(isBeingMoved ? 0.3 : 1.0)
+                .animation(.easeOut(duration: 0.15), value: isBeingMoved)
+                .offset(y: y)
+                .allowsHitTesting(false)
             }
         }
     }
@@ -334,16 +380,23 @@ struct CalendarView: View {
             if let task = dragTask {
                 ghostBlockView(title: task.title,
                                durationMinutes: task.estimatedMinutes,
+                               bufferMinutes: task.bufferMinutes,
                                minute: minute)
             } else if let block = dragBlock {
                 ghostBlockView(title: block.task.title,
                                durationMinutes: block.durationMinutes,
+                               bufferMinutes: block.task.bufferMinutes,
                                minute: minute)
             }
         }
     }
 
-    private func ghostBlockView(title: String, durationMinutes: Int, minute: Int) -> some View {
+    private func ghostBlockView(
+        title: String,
+        durationMinutes: Int,
+        bufferMinutes: Int,
+        minute: Int
+    ) -> some View {
         let y      = CalendarEngine.yOffset(for: minute)
         let height = max(CalendarEngine.minuteHeight * Double(durationMinutes), 24)
         let rangeText = CalendarEngine.timeRangeLabel(
@@ -351,7 +404,57 @@ struct CalendarView: View {
         )
         let isCompact = durationMinutes <= compactThresholdMinutes
 
-        return RoundedRectangle(cornerRadius: 7)
+        // Translucent buffer above the ghost block, mirroring the committed
+        // bufferView style but with the ghost's softer fill so it reads as
+        // a preview, not the real thing.
+        let bufferVisualStart  = max(0, minute - bufferMinutes)
+        let bufferVisualHeight = minute - bufferVisualStart
+        let showBuffer = bufferMinutes > 0 && bufferVisualHeight > 0
+        let bufferY = CalendarEngine.yOffset(for: bufferVisualStart)
+        let bufferH = Double(bufferVisualHeight) * CalendarEngine.minuteHeight
+
+        return ZStack(alignment: .topLeading) {
+            if showBuffer {
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 7, bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0, topTrailingRadius: 7,
+                    style: .continuous
+                )
+                .fill(Color.gray.opacity(0.18))
+                .overlay {
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 7, bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 0, topTrailingRadius: 7,
+                        style: .continuous
+                    )
+                    .strokeBorder(Color.gray.opacity(0.55), lineWidth: 1.5)
+                }
+                .frame(height: bufferH)
+                .padding(.leading, CalendarEngine.gutterWidth + 4)
+                .padding(.trailing, 8)
+                .offset(y: bufferY)
+            }
+
+            mainGhostBody(
+                title: title,
+                rangeText: rangeText,
+                height: height,
+                isCompact: isCompact
+            )
+            .offset(y: y)
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Extracted to keep ghostBlockView readable now that it also stacks a
+    /// buffer rectangle above the main ghost body.
+    private func mainGhostBody(
+        title: String,
+        rangeText: String,
+        height: Double,
+        isCompact: Bool
+    ) -> some View {
+        RoundedRectangle(cornerRadius: 7)
             .fill(Color.blue.opacity(0.18))
             .overlay {
                 RoundedRectangle(cornerRadius: 7)
@@ -392,8 +495,8 @@ struct CalendarView: View {
             }
             .padding(.leading, CalendarEngine.gutterWidth + 4)
             .padding(.trailing, 8)
-            .offset(y: y)
-            .allowsHitTesting(false)
+        // .offset and .allowsHitTesting are applied at the ghostBlockView ZStack
+        // level so they cover both the buffer runway and the main body.
     }
 
     // MARK: - Task Pools Section
@@ -696,6 +799,24 @@ private struct TaskInfoSheet: View {
                         }
                     }
 
+                    // Buffer — affects every block of this task. The
+                    // `.onDisappear` below reschedules notifications so changes
+                    // here propagate through to the buffer push.
+                    Stepper(
+                        value: Binding(
+                            get: { task.bufferMinutes },
+                            set: { task.bufferMinutes = $0 }
+                        ),
+                        in: 0...60, step: 5
+                    ) {
+                        HStack {
+                            Text("Buffer")
+                            Spacer()
+                            Text(task.bufferMinutes == 0 ? "None" : "\(task.bufferMinutes) min")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     // Scheduled time — only when a block exists
                     if let block {
                         DatePicker(
@@ -773,6 +894,15 @@ private struct TaskInfoSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            // Title, duration, and buffer changes all need to propagate to
+            // pending pushes. `schedule(for:)` is replace-or-create, so calling
+            // it once per block here is safe even if nothing changed. Fires
+            // for both Done-button and swipe-down dismissals.
+            .onDisappear {
+                for block in task.scheduledBlocks {
+                    NotificationManager.schedule(for: block)
+                }
+            }
         }
         .presentationDetents([.medium])
     }
@@ -805,6 +935,7 @@ private struct NewCalendarTaskSheet: View {
     @State private var title: String = ""
     @State private var subtext: String = ""
     @State private var estimatedMinutes: Int = 30
+    @State private var bufferMinutes: Int = 0
     @State private var scheduledDate: Date = NewCalendarTaskSheet.nextFiveMinuteIncrement(from: Date())
 
     var body: some View {
@@ -824,6 +955,15 @@ private struct NewCalendarTaskSheet: View {
                             Text("Duration")
                             Spacer()
                             Text(durationText)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Stepper(value: $bufferMinutes, in: 0...60, step: 5) {
+                        HStack {
+                            Text("Buffer")
+                            Spacer()
+                            Text(bufferMinutes == 0 ? "None" : "\(bufferMinutes) min")
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -882,7 +1022,8 @@ private struct NewCalendarTaskSheet: View {
         let task = TaskItem(
             title: cleanTitle,
             subtext: cleanSubtext,
-            estimatedMinutes: estimatedMinutes
+            estimatedMinutes: estimatedMinutes,
+            bufferMinutes: bufferMinutes
         )
         modelContext.insert(task)
 

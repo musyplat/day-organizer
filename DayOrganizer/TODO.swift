@@ -72,12 +72,20 @@ struct TODOView: View {
             }
             .buttonStyle(.plain)
 
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(task.title)
                     .font(.headline)
                 if !task.subtext.isEmpty {
                     Text(task.subtext)
                         .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                // Buffer indicator — informational only on the TODO list.
+                // Hourglass icon + "X min buffer" reads at a glance and
+                // disappears entirely when no buffer is set.
+                if task.bufferMinutes > 0 {
+                    Label("\(task.bufferMinutes) min buffer", systemImage: "hourglass")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
