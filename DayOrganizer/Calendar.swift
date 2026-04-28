@@ -25,6 +25,11 @@ struct CalendarView: View {
     /// (1.5 pt/min) can't fit two lines of caption text without overflow.
     private let compactThresholdMinutes = 20
 
+    /// Below this many buffer minutes the rectangle is too short (≈22.5 pt
+    /// at 15 min) to fit even one caption line plus padding, so the buffer
+    /// renders as a bare gray strip instead.
+    private let bufferLabelMinHeight = 15
+
     // MARK: Drag state
     @State private var dragTask: TaskItem?         // task dragged FROM the unassigned pool
     @State private var dragBlock: ScheduledBlock?  // block being relocated FROM the timeline
@@ -240,22 +245,81 @@ struct CalendarView: View {
                 let y = CalendarEngine.yOffset(for: visualStart)
                 let h = Double(visualHeight) * CalendarEngine.minuteHeight
                 let isBeingMoved = dragBlock?.persistentModelID == block.persistentModelID
-
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 7, bottomLeadingRadius: 0,
-                    bottomTrailingRadius: 0, topTrailingRadius: 7,
-                    style: .continuous
+                let rangeText = CalendarEngine.timeRangeLabel(
+                    startMinute: visualStart, durationMinutes: visualHeight
                 )
-                .fill(Color.gray.opacity(0.35))
-                .frame(height: h)
-                .padding(.leading, CalendarEngine.gutterWidth + 4)
-                .padding(.trailing, 8)
-                // Match the block's "being dragged" dim so buffer + block
-                // fade together when the user is relocating.
-                .opacity(isBeingMoved ? 0.3 : 1.0)
-                .animation(.easeOut(duration: 0.15), value: isBeingMoved)
-                .offset(y: y)
-                .allowsHitTesting(false)
+
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.gray.opacity(0.35))
+                    .frame(height: h)
+                    .overlay(alignment: .topLeading) {
+                        bufferLabel(
+                            title: block.task.title,
+                            range: rangeText,
+                            visualHeight: visualHeight,
+                            titleColor: .primary.opacity(0.75),
+                            timeColor: .secondary
+                        )
+                    }
+                    .padding(.leading, CalendarEngine.gutterWidth + 4)
+                    .padding(.trailing, 8)
+                    // Match the block's "being dragged" dim so buffer + block
+                    // fade together when the user is relocating.
+                    .opacity(isBeingMoved ? 0.3 : 1.0)
+                    .animation(.easeOut(duration: 0.15), value: isBeingMoved)
+                    .offset(y: y)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// Shared label content for both the committed buffer rectangle and the
+    /// ghost buffer preview. Suppresses entirely below `bufferLabelMinHeight`
+    /// (where caption text would overflow the rectangle), and uses the same
+    /// compact-vs-stacked logic as the block itself above that.
+    @ViewBuilder
+    private func bufferLabel(
+        title: String,
+        range: String,
+        visualHeight: Int,
+        titleColor: Color,
+        timeColor: Color
+    ) -> some View {
+        // "Workout · Buffer" — middle-dot reads as a separator, lighter weight
+        // than the block's title so the eye treats this as metadata.
+        let titleText = "\(title) · Buffer"
+
+        if visualHeight >= bufferLabelMinHeight {
+            let isCompact = visualHeight <= compactThresholdMinutes
+            if isCompact {
+                HStack(spacing: 6) {
+                    Text(titleText)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(titleColor)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(range)
+                        .font(.caption2)
+                        .foregroundStyle(timeColor)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(titleText)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(titleColor)
+                        .lineLimit(1)
+                    Text(range)
+                        .font(.caption2)
+                        .foregroundStyle(timeColor)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
             }
         }
     }
@@ -412,27 +476,31 @@ struct CalendarView: View {
         let showBuffer = bufferMinutes > 0 && bufferVisualHeight > 0
         let bufferY = CalendarEngine.yOffset(for: bufferVisualStart)
         let bufferH = Double(bufferVisualHeight) * CalendarEngine.minuteHeight
+        let bufferRangeText = CalendarEngine.timeRangeLabel(
+            startMinute: bufferVisualStart, durationMinutes: bufferVisualHeight
+        )
 
         return ZStack(alignment: .topLeading) {
             if showBuffer {
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 7, bottomLeadingRadius: 0,
-                    bottomTrailingRadius: 0, topTrailingRadius: 7,
-                    style: .continuous
-                )
-                .fill(Color.gray.opacity(0.18))
-                .overlay {
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 7, bottomLeadingRadius: 0,
-                        bottomTrailingRadius: 0, topTrailingRadius: 7,
-                        style: .continuous
-                    )
-                    .strokeBorder(Color.gray.opacity(0.55), lineWidth: 1.5)
-                }
-                .frame(height: bufferH)
-                .padding(.leading, CalendarEngine.gutterWidth + 4)
-                .padding(.trailing, 8)
-                .offset(y: bufferY)
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.gray.opacity(0.18))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(Color.gray.opacity(0.55), lineWidth: 1.5)
+                    }
+                    .frame(height: bufferH)
+                    .overlay(alignment: .topLeading) {
+                        bufferLabel(
+                            title: title,
+                            range: bufferRangeText,
+                            visualHeight: bufferVisualHeight,
+                            titleColor: .primary.opacity(0.75),
+                            timeColor: .secondary
+                        )
+                    }
+                    .padding(.leading, CalendarEngine.gutterWidth + 4)
+                    .padding(.trailing, 8)
+                    .offset(y: bufferY)
             }
 
             mainGhostBody(
