@@ -20,6 +20,11 @@ struct CalendarView: View {
 
     private let today = Calendar.current.startOfDay(for: Date())
 
+    /// Blocks at or below this duration use the single-line "title + range"
+    /// layout instead of the stacked layout, since their rendered height
+    /// (1.5 pt/min) can't fit two lines of caption text without overflow.
+    private let compactThresholdMinutes = 20
+
     // MARK: Drag state
     @State private var dragTask: TaskItem?         // task dragged FROM the unassigned pool
     @State private var dragBlock: ScheduledBlock?  // block being relocated FROM the timeline
@@ -39,6 +44,9 @@ struct CalendarView: View {
 
     // MARK: Info sheet
     @State private var infoSheetItem: InfoSheetItem?
+
+    // MARK: New-task sheet
+    @State private var showingNewTaskSheet = false
 
     // MARK: Derived data
 
@@ -123,6 +131,21 @@ struct CalendarView: View {
             .sheet(item: $infoSheetItem) { item in
                 TaskInfoSheet(task: item.task, block: item.block)
             }
+            .sheet(isPresented: $showingNewTaskSheet) {
+                NewCalendarTaskSheet()
+            }
+            // Toolbar items declared in a child view get merged into the
+            // enclosing NavigationStack's toolbar (TODOView uses the same
+            // pattern), so this lands as a "+" on the top-right.
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingNewTaskSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
         }
         .coordinateSpace(name: "canvas")
     }
@@ -205,22 +228,51 @@ struct CalendarView: View {
         let isPreparing  = preparingBlockID == block.persistentModelID
         let isBeingMoved = dragBlock?.persistentModelID == block.persistentModelID
 
+        let rangeText = CalendarEngine.timeRangeLabel(
+            startMinute: block.startMinute,
+            durationMinutes: block.durationMinutes
+        )
+        // Two-line layout overflows blocks shorter than ~25 min. For 20-min
+        // blocks and below, fold the range onto the title line — block height
+        // stays a proportional readout of duration; only the text reflow changes.
+        let isCompact = block.durationMinutes <= compactThresholdMinutes
+
         return RoundedRectangle(cornerRadius: 7)
             .fill(block.isCompleted ? Color.gray.opacity(0.45) : Color.blue.opacity(0.78))
             .frame(height: height)
             .overlay(alignment: .topLeading) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(block.task.title)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text(CalendarEngine.timeLabel(for: block.startMinute))
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.85))
+                if isCompact {
+                    HStack(spacing: 6) {
+                        Text(block.task.title)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        // Smaller font + lower opacity differentiates the range
+                        // from the title text without needing a separator glyph.
+                        Text(rangeText)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
+                            .layoutPriority(1) // keep the time readable; title truncates first
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(block.task.title)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text(rangeText)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
                 }
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
             }
             .padding(.leading, CalendarEngine.gutterWidth + 4)
             .padding(.trailing, 8)
@@ -294,6 +346,10 @@ struct CalendarView: View {
     private func ghostBlockView(title: String, durationMinutes: Int, minute: Int) -> some View {
         let y      = CalendarEngine.yOffset(for: minute)
         let height = max(CalendarEngine.minuteHeight * Double(durationMinutes), 24)
+        let rangeText = CalendarEngine.timeRangeLabel(
+            startMinute: minute, durationMinutes: durationMinutes
+        )
+        let isCompact = durationMinutes <= compactThresholdMinutes
 
         return RoundedRectangle(cornerRadius: 7)
             .fill(Color.blue.opacity(0.18))
@@ -303,18 +359,36 @@ struct CalendarView: View {
             }
             .frame(height: height)
             .overlay(alignment: .topLeading) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.primary.opacity(0.85))
-                        .lineLimit(1)
-                    Text(CalendarEngine.timeLabel(for: minute))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                if isCompact {
+                    HStack(spacing: 6) {
+                        Text(title)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.primary.opacity(0.85))
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(rangeText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.primary.opacity(0.85))
+                            .lineLimit(1)
+                        Text(rangeText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
                 }
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
             }
             .padding(.leading, CalendarEngine.gutterWidth + 4)
             .padding(.trailing, 8)
@@ -422,9 +496,12 @@ struct CalendarView: View {
                 Text(block.task.title)
                     .font(.subheadline)
                     .lineLimit(1)
-                Text(CalendarEngine.timeLabel(for: block.startMinute))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(CalendarEngine.timeRangeLabel(
+                    startMinute: block.startMinute,
+                    durationMinutes: block.durationMinutes
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             Spacer()
@@ -712,5 +789,117 @@ private struct TaskInfoSheet: View {
         let hours = mins / 60
         let rem   = mins % 60
         return rem == 0 ? "\(hours) hr" : "\(hours) hr \(rem) min"
+    }
+}
+
+// MARK: - New Calendar Task Sheet
+
+/// Mirrors `TaskInfoSheet`'s layout but for *creating* a task scheduled for
+/// today. Title and notes start blank; duration defaults to 30 min; the
+/// "Scheduled at" picker defaults to the next 5-minute increment from now.
+private struct NewCalendarTaskSheet: View {
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+
+    @State private var title: String = ""
+    @State private var subtext: String = ""
+    @State private var estimatedMinutes: Int = 30
+    @State private var scheduledDate: Date = NewCalendarTaskSheet.nextFiveMinuteIncrement(from: Date())
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Task Info") {
+                    TextField("Title", text: $title)
+
+                    TextField("Notes", text: $subtext, axis: .vertical)
+                        .lineLimit(1...4)
+
+                    Stepper(
+                        value: $estimatedMinutes,
+                        in: 5...480, step: 5
+                    ) {
+                        HStack {
+                            Text("Duration")
+                            Spacer()
+                            Text(durationText)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    DatePicker(
+                        "Scheduled at",
+                        selection: $scheduledDate,
+                        displayedComponents: .hourAndMinute
+                    )
+                }
+            }
+            .navigationTitle("New Task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        save()
+                        dismiss()
+                    }
+                    // Block submission for an empty title — matches TaskItem's
+                    // implicit assumption that title is the primary identifier.
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var durationText: String {
+        let mins = estimatedMinutes
+        guard mins >= 60 else { return "\(mins) min" }
+        let hours = mins / 60
+        let rem   = mins % 60
+        return rem == 0 ? "\(hours) hr" : "\(hours) hr \(rem) min"
+    }
+
+    /// Smallest 5-minute boundary strictly greater than `date`. If `date`
+    /// already lands on a 5-minute mark, advances to the next one (i.e. 4:55
+    /// → 5:00, never 4:55 → 4:55). Seconds are stripped so the math is exact.
+    private static func nextFiveMinuteIncrement(from date: Date) -> Date {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let truncated = cal.date(from: comps) ?? date
+        let mins = comps.minute ?? 0
+        let bump = mins % 5 == 0 ? 5 : 5 - (mins % 5)
+        return cal.date(byAdding: .minute, value: bump, to: truncated) ?? date
+    }
+
+    private func save() {
+        let cleanTitle   = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSubtext = subtext.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let task = TaskItem(
+            title: cleanTitle,
+            subtext: cleanSubtext,
+            estimatedMinutes: estimatedMinutes
+        )
+        modelContext.insert(task)
+
+        // Use today's startOfDay as the dayDate so the block lands in the
+        // current calendar day even if `scheduledDate` happened to wrap to
+        // tomorrow because the bump crossed midnight.
+        let today = Calendar.current.startOfDay(for: Date())
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: scheduledDate)
+        let startMinute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+
+        let block = ScheduledBlock(
+            task: task,
+            dayDate: today,
+            startMinute: startMinute,
+            durationMinutes: estimatedMinutes
+        )
+        modelContext.insert(block)
+        NotificationManager.schedule(for: block)
     }
 }

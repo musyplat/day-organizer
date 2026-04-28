@@ -49,6 +49,14 @@ struct CalendarEngine {
         return "\(displayHour):\(String(format: "%02d", m)) \(suffix)"
     }
 
+    /// "9:30 AM – 10:15 AM" — start and end of a block. The end wraps mod
+    /// 24 h so a block that crosses midnight reads e.g. "11:30 PM – 1:00 AM".
+    static func timeRangeLabel(startMinute: Int, durationMinutes: Int) -> String {
+        let dayMinutes = 24 * 60
+        let end = ((startMinute + durationMinutes) % dayMinutes + dayMinutes) % dayMinutes
+        return "\(timeLabel(for: startMinute)) – \(timeLabel(for: end))"
+    }
+
     // MARK: - Private
 
     private static func clamped(_ minute: Int) -> Int {

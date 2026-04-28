@@ -20,12 +20,24 @@ class ScheduledBlock {
     /// True after the user ticks this block as done on the calendar
     var isCompleted: Bool
 
+    /// Stable id used as the *local-notification* identifier.
+    /// We can't use `persistentModelID` for this because SwiftData rewrites
+    /// that value when an inserted object is first saved — meaning the id
+    /// used at schedule time may no longer match the id we'd compute later
+    /// when canceling/rescheduling, leaving the original pending request
+    /// orphaned (it would still fire on top of the new one).
+    /// Optional so the field is added via lightweight migration; new blocks
+    /// always get a UUID in `init`, and `NotificationManager` lazily fills
+    /// it in for any legacy rows on first use.
+    var notificationID: UUID?
+
     init(task: TaskItem, dayDate: Date, startMinute: Int, durationMinutes: Int? = nil) {
         self.task = task
         self.dayDate = dayDate
         self.startMinute = startMinute
         self.durationMinutes = durationMinutes ?? task.estimatedMinutes
         self.isCompleted = false
+        self.notificationID = UUID()
     }
 
     var endMinute: Int { startMinute + durationMinutes }
